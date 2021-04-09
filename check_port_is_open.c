@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <assert.h>
 
 #define DEFAULT_TIMEOUT 3
 #define MAX_NUM_THREAD 100 // Limited by system resources
@@ -23,14 +25,16 @@
 #define FTP_PORT_NUMBER 21
 #define TELNET_PORT_NUMBER 23
 #define SSH_PORT_NUMBER 22
+#define LOG_MSG_LEN 200
 
 int16_t recv_timeout = DEFAULT_TIMEOUT;
 int16_t send_timeout = DEFAULT_TIMEOUT;
-
 int16_t num_thread;
 int config = -1; // -1: invalid, 0: all ports, 1: well-known ports, 2: specified port, 3: port range
 char *hostname = NULL;
 char specified_port[7];
+// char open_ports_list[LOG_MSG_LEN];
+// char *report_data = &(open_ports_list[0]);
 
 const static struct option long_options[] = {
 	{"help", no_argument, 0, 0x1},
@@ -43,14 +47,24 @@ const static struct option long_options[] = {
 	{"port-range", no_argument, 0, 'p'},
 	{0, 0, 0, 0}};
 
+struct thread_args
+{
+	uint16_t start_port_number;
+	uint16_t end_port_number;
+};
+
 void usage();
 bool parse_argv(int, char **, uint16_t *, uint16_t *);
 int socket_creation();
 bool socket_connect(int, char *, uint16_t, int *);
-void port_scanner(uint16_t, uint16_t);
+void *port_scanner(void *); // thread
+void scan_one_port(uint16_t);
 
 int main(int argc, char **argv)
 {
+	// memset(open_ports_list, '\0', LOG_MSG_LEN);
+	// strcpy(report_data, "open port(s): ");
+
 	uint16_t start = DEFAULT_START;
 	uint16_t end = DEFAULT_END;
 
@@ -64,32 +78,32 @@ int main(int argc, char **argv)
 		if (strcmp(specified_port, "http") == 0)
 		{
 			puts("http");
-			port_scanner(HTTP_PORT_NUMBER, HTTP_PORT_NUMBER);
+			scan_one_port(HTTP_PORT_NUMBER);
 		}
 		else if (strcmp(specified_port, "tls") == 0)
 		{
 			puts("tls");
-			port_scanner(TLS_PORT_NUMBER, TLS_PORT_NUMBER);
+			scan_one_port(TLS_PORT_NUMBER);
 		}
 		else if (strcmp(specified_port, "smtp") == 0)
 		{
 			puts("smtp");
-			port_scanner(SMTP_PORT_NUMBER, SMTP_PORT_NUMBER);
+			scan_one_port(SMTP_PORT_NUMBER);
 		}
 		else if (strcmp(specified_port, "ftp") == 0)
 		{
 			puts("ftp");
-			port_scanner(FTP_PORT_NUMBER, FTP_PORT_NUMBER);
+			scan_one_port(FTP_PORT_NUMBER);
 		}
 		else if (strcmp(specified_port, "telnet") == 0)
 		{
 			puts("telnet");
-			port_scanner(TELNET_PORT_NUMBER, TELNET_PORT_NUMBER);
+			scan_one_port(TELNET_PORT_NUMBER);
 		}
 		else if (strcmp(specified_port, "ssh") == 0)
 		{
 			puts("ssh");
-			port_scanner(SSH_PORT_NUMBER, SSH_PORT_NUMBER);
+			scan_one_port(SSH_PORT_NUMBER);
 		}
 		else
 		{
@@ -98,17 +112,55 @@ int main(int argc, char **argv)
 	}
 	else
 	{
-		port_scanner(start, end);
+		int number_of_ports = end - start + 1;
+		int ports_of_each_thread = number_of_ports / num_thread;
+		int remained_ports = number_of_ports % num_thread;
+		int i, counter = 0, result_code;
+
+		pthread_t threads[num_thread];
+
+		for (i = start; counter < num_thread - 1; i += ports_of_each_thread)
+		{
+
+			struct thread_args *range = malloc(sizeof(struct thread_args));
+			range->start_port_number = i;
+			range->end_port_number = (i + ports_of_each_thread);
+
+			pthread_create(&threads[counter], NULL, port_scanner, range);
+
+			counter++;
+		}
+
+		struct thread_args *range = malloc(sizeof(struct thread_args));
+		range->start_port_number = i;
+		range->end_port_number = end;
+
+		pthread_t thread_id;
+		pthread_create(&threads[counter], NULL, port_scanner, range);
+
+		for (i = 0; i < num_thread; i++)
+		{
+			result_code = pthread_join(threads[i], NULL);
+			assert(!result_code);
+		}
+		
 	}
+	// puts(open_ports_list);
+	// puts(report_data);
 	return (0);
 }
 
-void port_scanner(uint16_t start_port_number, uint16_t end_port_number)
+void *port_scanner(void *args)
 {
+	struct thread_args *range = (struct thread_args *)args;
+
+	uint16_t start_port_number = range->start_port_number;
+	uint16_t end_port_number = range->end_port_number;
+
 	int socket;
 	int out_errno;
 
-	for (int i = start_port_number; i <= end_port_number; i++)
+	for (int i = start_port_number; i < end_port_number; i++)
 	{
 		socket = socket_creation();
 
@@ -121,6 +173,7 @@ void port_scanner(uint16_t start_port_number, uint16_t end_port_number)
 		if (socket_connect(socket, hostname, (uint16_t)i, &out_errno))
 		{
 			printf("%s:%d is open\n", hostname, i);
+			// report_data += sprintf(report_data, "%d, ", i);
 		}
 		// port may not be open
 		else
@@ -129,38 +182,38 @@ void port_scanner(uint16_t start_port_number, uint16_t end_port_number)
 			{
 			// The port may not be DROPPED by the firewall :
 			case ECONNREFUSED: /* Connection refused. */
-				printf("%s:%d may_not_be_firewalled. (ECONNREFUSED)\n", hostname, i);
+				// printf("%s:%d may_not_be_firewalled. (ECONNREFUSED)\n", hostname, i);
 				break;
 
 			// The port may be DROPPED by the firewall :
 			case EINPROGRESS:
-				printf("%s:%d firewall_det. (EINPROGRESS)\n", hostname, i);
+				// printf("%s:%d firewall_det. (EINPROGRESS)\n", hostname, i);
 				break;
 			case ETIMEDOUT: /* Connection timedout. */
-				printf("%s:%d firewall_det. (ETIMEDOUT)\n", hostname, i);
+				// printf("%s:%d firewall_det. (ETIMEDOUT)\n", hostname, i);
 				break;
 
 			// Error client :
 			case ENETUNREACH: /* Network unreachable. */
-				printf("%s:%d Network unreachable. (ENETUNREACH)\n", hostname, i);
+				// printf("%s:%d Network unreachable. (ENETUNREACH)\n", hostname, i);
 				break;
 			case EINTR: /* Interrupted. */
-				printf("%s:%d Interrupted. (EINTR)\n", hostname, i);
+				// printf("%s:%d Interrupted. (EINTR)\n", hostname, i);
 				break;
 			case EFAULT: /* Fault. */
-				printf("%s:%d Fault. (EFAULT)\n", hostname, i);
+				// printf("%s:%d Fault. (EFAULT)\n", hostname, i);
 				break;
 			case EBADF: /* Invalid sockfd. */
-				printf("%s:%d Invalid sockfd. (EBADF)\n", hostname, i);
+				// printf("%s:%d Invalid sockfd. (EBADF)\n", hostname, i);
 				break;
 			case ENOTSOCK: /* sockfd is not a socket file descriptor. */
-				printf("%s:%d sockfd is not a socket file descriptor. (ENOTSOCK)\n", hostname, i);
+				// printf("%s:%d sockfd is not a socket file descriptor. (ENOTSOCK)\n", hostname, i);
 				break;
 			case EPROTOTYPE: /* Socket does not support the protocol. */
-				printf("%s:%d Socket does not support the protocol. (EPROTOTYPE)\n", hostname, i);
+				// printf("%s:%d Socket does not support the protocol. (EPROTOTYPE)\n", hostname, i);
 				break;
 			default:
-				printf("%s:%d Unknown error. (unknown_error)\n", hostname, i);
+				// printf("%s:%d Unknown error. (unknown_error)\n", hostname, i);
 				break;
 			}
 		}
@@ -168,6 +221,71 @@ void port_scanner(uint16_t start_port_number, uint16_t end_port_number)
 		{
 			close(socket);
 		}
+	}
+	return NULL;
+}
+
+void scan_one_port(uint16_t port_number)
+{
+	int socket;
+	int out_errno;
+
+	socket = socket_creation();
+	if (socket < 0)
+	{
+		perror("socket_creation() failed");
+	}
+
+	// Connect OK -> port is open
+	if (socket_connect(socket, hostname, port_number, &out_errno))
+	{
+		printf("%s:%d is open\n", hostname, (int)port_number);
+	}
+	// port may not be open
+	else
+	{
+		switch (out_errno)
+		{
+		// The port may not be DROPPED by the firewall :
+		case ECONNREFUSED: /* Connection refused. */
+			printf("%s:%d may_not_be_firewalled. (ECONNREFUSED)\n", hostname, (int)port_number);
+			break;
+
+		// The port may be DROPPED by the firewall :
+		case EINPROGRESS:
+			printf("%s:%d firewall_det. (EINPROGRESS)\n", hostname, (int)port_number);
+			break;
+		case ETIMEDOUT: /* Connection timedout. */
+			printf("%s:%d firewall_det. (ETIMEDOUT)\n", hostname, (int)port_number);
+			break;
+
+		// Error client :
+		case ENETUNREACH: /* Network unreachable. */
+			printf("%s:%d Network unreachable. (ENETUNREACH)\n", hostname, (int)port_number);
+			break;
+		case EINTR: /* Interrupted. */
+			printf("%s:%d Interrupted. (EINTR)\n", hostname, (int)port_number);
+			break;
+		case EFAULT: /* Fault. */
+			printf("%s:%d Fault. (EFAULT)\n", hostname, (int)port_number);
+			break;
+		case EBADF: /* Invalid sockfd. */
+			printf("%s:%d Invalid sockfd. (EBADF)\n", hostname, (int)port_number);
+			break;
+		case ENOTSOCK: /* sockfd is not a socket file descriptor. */
+			printf("%s:%d sockfd is not a socket file descriptor. (ENOTSOCK)\n", hostname, (int)port_number);
+			break;
+		case EPROTOTYPE: /* Socket does not support the protocol. */
+			printf("%s:%d Socket does not support the protocol. (EPROTOTYPE)\n", hostname, (int)port_number);
+			break;
+		default:
+			printf("%s:%d Unknown error. (unknown_error)\n", hostname, (int)port_number);
+			break;
+		}
+	}
+	if (socket > -1)
+	{
+		close(socket);
 	}
 }
 
@@ -295,7 +413,8 @@ bool parse_argv(int argc, char *argv[], uint16_t *start, uint16_t *end)
 		// specified port
 		case 's':
 			config = 2;
-			for (int i = 0; i < strlen(optarg); i++) {
+			for (int i = 0; i < strlen(optarg); i++)
+			{
 				specified_port[i] = optarg[i];
 			}
 			specified_port[6] = '\0';
