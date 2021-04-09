@@ -182,38 +182,38 @@ void *port_scanner(void *args)
 			{
 			// The port may not be DROPPED by the firewall :
 			case ECONNREFUSED: /* Connection refused. */
-				// printf("%s:%d may_not_be_firewalled. (ECONNREFUSED)\n", hostname, i);
+				printf("%s:%d may_not_be_firewalled. (ECONNREFUSED)\n", hostname, i);
 				break;
 
 			// The port may be DROPPED by the firewall :
 			case EINPROGRESS:
-				// printf("%s:%d firewall_det. (EINPROGRESS)\n", hostname, i);
+				printf("%s:%d firewall_det. (EINPROGRESS)\n", hostname, i);
 				break;
 			case ETIMEDOUT: /* Connection timedout. */
-				// printf("%s:%d firewall_det. (ETIMEDOUT)\n", hostname, i);
+				printf("%s:%d firewall_det. (ETIMEDOUT)\n", hostname, i);
 				break;
 
 			// Error client :
 			case ENETUNREACH: /* Network unreachable. */
-				// printf("%s:%d Network unreachable. (ENETUNREACH)\n", hostname, i);
+				printf("%s:%d Network unreachable. (ENETUNREACH)\n", hostname, i);
 				break;
 			case EINTR: /* Interrupted. */
-				// printf("%s:%d Interrupted. (EINTR)\n", hostname, i);
+				printf("%s:%d Interrupted. (EINTR)\n", hostname, i);
 				break;
 			case EFAULT: /* Fault. */
-				// printf("%s:%d Fault. (EFAULT)\n", hostname, i);
+				printf("%s:%d Fault. (EFAULT)\n", hostname, i);
 				break;
 			case EBADF: /* Invalid sockfd. */
-				// printf("%s:%d Invalid sockfd. (EBADF)\n", hostname, i);
+				printf("%s:%d Invalid sockfd. (EBADF)\n", hostname, i);
 				break;
 			case ENOTSOCK: /* sockfd is not a socket file descriptor. */
-				// printf("%s:%d sockfd is not a socket file descriptor. (ENOTSOCK)\n", hostname, i);
+				printf("%s:%d sockfd is not a socket file descriptor. (ENOTSOCK)\n", hostname, i);
 				break;
 			case EPROTOTYPE: /* Socket does not support the protocol. */
-				// printf("%s:%d Socket does not support the protocol. (EPROTOTYPE)\n", hostname, i);
+				printf("%s:%d Socket does not support the protocol. (EPROTOTYPE)\n", hostname, i);
 				break;
 			default:
-				// printf("%s:%d Unknown error. (unknown_error)\n", hostname, i);
+				printf("%s:%d Unknown error. (unknown_error)\n", hostname, i);
 				break;
 			}
 		}
