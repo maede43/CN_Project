@@ -9,26 +9,38 @@
 #include <stdlib.h>
 #include <netinet/ip_icmp.h>
 #include <time.h>
+#include <stdbool.h>
 
 #define DEFAULT_TTL 64;
-// Gives the timeout delay for receiving packets
-// in seconds
 #define RECV_TIMEOUT 1
 // Automatic port number
 #define PORT_NO 0
+#define DEFAULT_PACKET_SIZE 64
+#define PING_SLEEP_RATE 1000000
 
 // time to live value
 int ttl_val = DEFAULT_TTL;
+// ping packet size
+int packet_size = DEFAULT_PACKET_SIZE;
+
+// ping packet structure
+struct ping_pkt
+{
+    struct icmphdr header;
+    char *msg;
+};
 
 int socket_creation();
-struct in_addr **dns_lookup(char*, struct hostent*);
+struct in_addr **dns_lookup(char *, struct hostent *);
+unsigned short checksum(void *, int);
+void send_ping(int, struct sockaddr_in *, char *);
 
 int main(int argc, char *argv[])
 {
     struct hostent host_entity;
     if (argc != 2)
     {
-        printf("\n%s <host>\n", argv[0]);
+        printf("usage : sudo %s <host>\n", argv[0]);
         return 0;
     }
 
@@ -46,14 +58,25 @@ int main(int argc, char *argv[])
         printf("\n");
     }
 
-    // struct sockaddr_in server_addr;
-    // server_addr.sin_family = host_entity.h_addrtype;
-    // server_addr.sin_port = htons(PORT_NO);
-    // server_addr.sin_addr.s_addr = *(long *)host_entity.h_addr;
+    // works for first ip addr
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = host_entity.h_addrtype;
+    server_addr.sin_port = htons(PORT_NO);
+    server_addr.sin_addr.s_addr = *(long *)ip_list[0];
 
-    // char *ip = (char *)malloc(NI_MAXHOST * sizeof(char));
-    // //filling up address structure
-    // strcpy(ip, inet_ntoa(*(struct in_addr *)host_entity.h_addr));
+    char *ip_addr = (char *)malloc(NI_MAXHOST * sizeof(char));
+    //filling up address structure
+    strcpy(ip_addr, inet_ntoa(*(struct in_addr *)ip_list[0]));
+
+    int sockfd = socket_creation();
+    if (sockfd < 0)
+    {
+        printf("\nSocket() failed.\n");
+        return 0;
+    }
+
+    //send pings continuously
+    send_ping(sockfd, &server_addr, ip_addr);
 
     return 0;
 }
@@ -95,7 +118,7 @@ int socket_creation()
     // set socket options at ip to TTL
     if (setsockopt(fd, SOL_IP, IP_TTL, &ttl_val, sizeof(ttl_val)) != 0)
     {
-        printf("\nSetting socket options to TTL failed!\n");
+        printf("Setting socket options to TTL failed!\n");
         if (fd > -1)
         {
             close(fd);
@@ -106,7 +129,7 @@ int socket_creation()
     // setting timeout of recv setting
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv_out, sizeof(tv_out)) < 0)
     {
-        perror("\nSetting socket options to Timeout failed!\n");
+        perror("Setting socket options to Timeout failed!\n");
         if (fd > -1)
         {
             close(fd);
@@ -114,4 +137,95 @@ int socket_creation()
         }
     }
     return fd;
+}
+
+// ping request
+void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
+{
+    int msg_count = 0, i, addr_len, msg_received_count = 0;
+    bool packet_sent = true;
+
+    struct ping_pkt packet;
+    struct sockaddr_in recv_addr;
+    struct timespec time_start, time_end;
+    long double rtt = 0;
+
+    // send icmp packet in an infinite loop
+    while (1)
+    {
+        bzero(&packet, sizeof(packet));
+        packet_sent = true;
+
+        packet.header.type = ICMP_ECHO;
+        packet.header.un.echo.id = getpid(); // id of current process
+        packet.msg = (char *)malloc((packet_size - sizeof(struct icmphdr)) * sizeof(char));
+
+        // filling packet by '1234...'
+        for (i = 0; i < sizeof(packet.msg) - 1; i++)
+            packet.msg[i] = i + '0';
+
+        printf("msg: %s\n", packet.msg);
+
+        packet.msg[i] = 0;
+        packet.header.un.echo.sequence = msg_count++;
+        packet.header.checksum = checksum(&packet, sizeof(packet));
+
+        usleep(PING_SLEEP_RATE);
+
+        //send packet
+        clock_gettime(CLOCK_MONOTONIC, &time_start);
+        //sendto => Send packet on ping_socket to peer at ping_addr
+        //returns the number sent, or -1 for errors.
+        if (sendto(ping_sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)ping_addr, sizeof(*ping_addr)) <= 0)
+        {
+            packet_sent = false;
+            printf("sendto() failed.\n");
+        }
+
+        addr_len = sizeof(recv_addr);
+        //receive packet
+        if (recvfrom(ping_sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&recv_addr, &addr_len) <= 0 &&
+            msg_count > 1)
+        {
+            printf("recvfrom() failed!\n");
+        }
+        else
+        {
+            // calculate RTT
+            clock_gettime(CLOCK_MONOTONIC, &time_end);
+            double timeElapsed = ((double)(time_end.tv_nsec - time_start.tv_nsec)) / 1000000.0;
+            rtt = (time_end.tv_sec - time_start.tv_sec) * 1000.0 + timeElapsed;
+
+            // if packet was not sent, don't receive
+            if (packet_sent)
+            {
+                if ((packet.header.type == 69 && packet.header.code == 0))
+                {
+                    printf("Reply from IP<%s> in %Lfms seq=%d.\n", ping_ip, rtt, msg_count);
+                    msg_received_count++;
+                }
+                else
+                {
+                    printf("Error..ICMP type %d, code %d\n", packet.header.type, packet.header.code);
+                }
+            }
+        }
+    }
+}
+
+// Calculate checksum bit
+unsigned short checksum(void *b, int len)
+{
+    unsigned short *buf = b;
+    unsigned int sum = 0;
+    for (sum = 0; len > 1; len -= 2)
+        sum += *buf++;
+
+    if (len == 1)
+        sum += *(unsigned char *)buf;
+
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum += (sum >> 16);
+    // One's Complement
+    return ~sum;
 }
