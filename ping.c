@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <float.h>
+#include <assert.h>
+#include <pthread.h>
 
 #define DEFAULT_TTL 64;
 #define RECV_TIMEOUT 1
@@ -25,6 +27,8 @@ int ttl_val = DEFAULT_TTL;
 // ping packet size
 int packet_size = DEFAULT_PACKET_SIZE;
 bool continue_pinging = true;
+char *ip_addr;
+long double min_rtt = LDBL_MAX, max_rtt = 0;
 
 // ping packet structure
 struct ping_pkt
@@ -32,11 +36,17 @@ struct ping_pkt
     struct icmphdr header;
     char *msg;
 };
+struct thread_args
+{
+    int ping_sockfd;
+    struct sockaddr_in *ping_addr;
+    char *ping_ip;
+};
 
 int socket_creation();
 struct in_addr **dns_lookup(char *, struct hostent *);
 unsigned short checksum(void *, int);
-void send_ping(int, struct sockaddr_in *, char *);
+void *send_ping(void *);
 // Interrupt handler
 void intHandler(int dummy);
 
@@ -45,47 +55,64 @@ int main(int argc, char *argv[])
     //catching interrupt
     signal(SIGINT, intHandler);
 
-    struct hostent host_entity;
     if (argc != 2)
     {
         printf("usage : sudo %s <host>\n", argv[0]);
         return 0;
     }
 
+    struct hostent host_entity;
     struct in_addr **ip_list = dns_lookup(argv[1], &host_entity);
     if (ip_list == NULL)
     {
-        printf("\nResolving failed.\n");
+        printf("Resolving failed.\n");
         return 0;
     }
 
-    printf("All addresses: ");
-    for (int i = 0; ip_list[i] != NULL; i++)
+    printf("All addresses: \n");
+    int i;
+    for (i = 0; ip_list[i] != NULL; i++)
     {
         printf("%s ", inet_ntoa(*ip_list[i]));
         printf("\n");
     }
+    int num_thread = i;
 
-    // works for first ip addr
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = host_entity.h_addrtype;
-    server_addr.sin_port = htons(PORT_NO);
-    server_addr.sin_addr.s_addr = *(long *)ip_list[0];
-
-    char *ip_addr = (char *)malloc(NI_MAXHOST * sizeof(char));
-    //filling up address structure
-    strcpy(ip_addr, inet_ntoa(*(struct in_addr *)ip_list[0]));
-
-    int sockfd = socket_creation();
-    if (sockfd < 0)
+    pthread_t *pthreadArray = malloc(sizeof(pthread_t) * num_thread);
+    for (i = 0; i < num_thread; i++)
     {
-        printf("\nSocket() failed.\n");
-        return 0;
+        struct sockaddr_in server_addr;
+        server_addr.sin_family = host_entity.h_addrtype;
+        // The ICMP packet does not have port numbers because
+        // it was designed to communicate network-layer information
+        // not between application layer processes
+        server_addr.sin_addr.s_addr = *(long *)ip_list[i];
+
+        int sockfd = socket_creation();
+        if (sockfd < 0)
+        {
+            printf("Socket() failed.\n");
+            free(pthreadArray);
+            exit(EXIT_FAILURE);
+        }
+
+        ip_addr = (char *)malloc(NI_MAXHOST * sizeof(char));
+        //filling up address structure
+        strcpy(ip_addr, inet_ntoa(*(struct in_addr *)ip_list[i]));
+
+        struct thread_args *args_p = malloc(sizeof(struct thread_args));
+        args_p->ping_sockfd = sockfd;
+        args_p->ping_addr = &server_addr;
+        args_p->ping_ip = ip_addr;
+
+        printf("Host<%s> added for being pinged...\n", ip_addr);
+        pthread_create(&pthreadArray[i], NULL, send_ping, args_p);
     }
-
-    //send pings continuously
-    send_ping(sockfd, &server_addr, ip_addr);
-
+    for (i = 0; i < num_thread; i++)
+    {
+        int result_code = pthread_join(pthreadArray[i], NULL);
+        assert(!result_code);
+    }
     return 0;
 }
 
@@ -148,9 +175,13 @@ int socket_creation()
 }
 
 // ping request
-void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
+void *send_ping(void *args)
 {
-    long double min_rtt = LDBL_MAX, max_rtt = 0;
+    struct thread_args *args_p = (struct thread_args *)args;
+    int ping_sockfd = args_p->ping_sockfd;
+    struct sockaddr_in *ping_addr = args_p->ping_addr;
+    char *ping_ip = args_p->ping_ip;
+
     int msg_count = 0, i, addr_len, msg_received_count = 0;
     bool packet_sent = true;
 
@@ -172,8 +203,6 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
         // filling packet by '1234...'
         for (i = 0; i < sizeof(packet.msg) - 1; i++)
             packet.msg[i] = i + '0';
-
-        printf("msg: %s\n", packet.msg);
 
         packet.msg[i] = 0;
         packet.header.un.echo.sequence = msg_count++;
@@ -208,18 +237,25 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
             // if packet was not sent, don't receive
             if (packet_sent)
             {
-                if ((packet.header.type == 69 && packet.header.code == 0))
+                if (continue_pinging)
                 {
-                    printf("Reply from IP<%s> in %Lfms seq=%d.\n", ping_ip, rtt, msg_count);
-                    msg_received_count++;
-                    if (rtt < min_rtt)
-                        min_rtt = rtt;
-                    if (rtt > max_rtt)
-                        max_rtt = rtt;
+                    if ((packet.header.type == 69 && packet.header.code == 0))
+                    {
+                        printf("Reply from IP<%s> in %Lfms seq=%d.\n", ping_ip, rtt, msg_count);
+                        msg_received_count++;
+                        if (rtt < min_rtt)
+                            min_rtt = rtt;
+                        if (rtt > max_rtt)
+                            max_rtt = rtt;
+                    }
+                    else
+                    {
+                        printf("Error..ICMP type %d, code %d\n", packet.header.type, packet.header.code);
+                    }
                 }
                 else
                 {
-                    printf("Error..ICMP type %d, code %d\n", packet.header.type, packet.header.code);
+                    msg_count--;
                 }
             }
         }
@@ -227,10 +263,9 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
     if (msg_received_count > 0)
     {
         float loss = ((msg_count - msg_received_count) / (float)msg_count) * 100.0;
-        printf("\n------------statistics------------\n");
         printf("for IP<%s> <%d> packet(s) sent and <%d> packet(s) received, loss = %f%%.\n", ping_ip, msg_count, msg_received_count, loss);
-        printf("MINIMUM RTT=<%Lf>ms MAXIMUM RTT=<%Lf>ms.\n", min_rtt, max_rtt);
     }
+    return NULL;
 }
 
 // Calculate checksum bit
@@ -254,4 +289,6 @@ unsigned short checksum(void *b, int len)
 void intHandler(int dummy)
 {
     continue_pinging = false;
+    printf("\n------------statistics------------\n");
+    printf("MINIMUM RTT=<%Lf>ms MAXIMUM RTT=<%Lf>ms.\n", min_rtt, max_rtt);
 }
