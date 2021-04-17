@@ -10,6 +10,8 @@
 #include <netinet/ip_icmp.h>
 #include <time.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <float.h>
 
 #define DEFAULT_TTL 64;
 #define RECV_TIMEOUT 1
@@ -22,6 +24,7 @@
 int ttl_val = DEFAULT_TTL;
 // ping packet size
 int packet_size = DEFAULT_PACKET_SIZE;
+bool continue_pinging = true;
 
 // ping packet structure
 struct ping_pkt
@@ -34,9 +37,14 @@ int socket_creation();
 struct in_addr **dns_lookup(char *, struct hostent *);
 unsigned short checksum(void *, int);
 void send_ping(int, struct sockaddr_in *, char *);
+// Interrupt handler
+void intHandler(int dummy);
 
 int main(int argc, char *argv[])
 {
+    //catching interrupt
+    signal(SIGINT, intHandler);
+
     struct hostent host_entity;
     if (argc != 2)
     {
@@ -142,6 +150,7 @@ int socket_creation()
 // ping request
 void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
 {
+    long double min_rtt = LDBL_MAX, max_rtt = 0;
     int msg_count = 0, i, addr_len, msg_received_count = 0;
     bool packet_sent = true;
 
@@ -151,7 +160,7 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
     long double rtt = 0;
 
     // send icmp packet in an infinite loop
-    while (1)
+    while (continue_pinging)
     {
         bzero(&packet, sizeof(packet));
         packet_sent = true;
@@ -203,6 +212,10 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
                 {
                     printf("Reply from IP<%s> in %Lfms seq=%d.\n", ping_ip, rtt, msg_count);
                     msg_received_count++;
+                    if (rtt < min_rtt)
+                        min_rtt = rtt;
+                    if (rtt > max_rtt)
+                        max_rtt = rtt;
                 }
                 else
                 {
@@ -210,6 +223,13 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr, char *ping_ip)
                 }
             }
         }
+    }
+    if (msg_received_count > 0)
+    {
+        float loss = ((msg_count - msg_received_count) / (float)msg_count) * 100.0;
+        printf("\n------------statistics------------\n");
+        printf("for IP<%s> <%d> packet(s) sent and <%d> packet(s) received, loss = %f%%.\n", ping_ip, msg_count, msg_received_count, loss);
+        printf("MINIMUM RTT=<%Lf>ms MAXIMUM RTT=<%Lf>ms.\n", min_rtt, max_rtt);
     }
 }
 
@@ -228,4 +248,10 @@ unsigned short checksum(void *b, int len)
     sum += (sum >> 16);
     // One's Complement
     return ~sum;
+}
+
+// Interrupt handler
+void intHandler(int dummy)
+{
+    continue_pinging = false;
 }
