@@ -14,21 +14,30 @@
 #include <float.h>
 #include <assert.h>
 #include <pthread.h>
+#include <getopt.h>
 
 #define DEFAULT_TTL 64;
-#define RECV_TIMEOUT 1
+#define DEFAULT_RECV_TIMEOUT 1
 // Automatic port number
 #define PORT_NO 0
 #define DEFAULT_PACKET_SIZE 64
 #define PING_SLEEP_RATE 1000000
 
-// time to live value
+// time to live value -  how long the packet can be left alive in a network.
 int ttl_val = DEFAULT_TTL;
+
+int timeout = DEFAULT_RECV_TIMEOUT;
 // ping packet size
 int packet_size = DEFAULT_PACKET_SIZE;
 bool continue_pinging = true;
 char *ip_addr;
 long double min_rtt = LDBL_MAX, max_rtt = 0;
+
+const static struct option long_options[] = {
+    {"help", no_argument, 0, 0x1},
+    {"size", required_argument, 0, 's'},
+    {"timeout", required_argument, 0, 't'},
+    {0, 0, 0, 0}};
 
 // ping packet structure
 struct ping_pkt
@@ -43,70 +52,76 @@ struct thread_args
     char *ping_ip;
 };
 
+void usage(char *app);
+bool parse_argv(int argc, char *argv[]);
 int socket_creation();
 struct in_addr **dns_lookup(char *, struct hostent *);
 unsigned short checksum(void *, int);
 void *send_ping(void *);
 // Interrupt handler
 void intHandler(int dummy);
+int needed_thread_NO(int, int, char *[]);
 
 int main(int argc, char *argv[])
 {
     //catching interrupt
     signal(SIGINT, intHandler);
 
-    if (argc != 2)
+    if (!parse_argv(argc, argv))
     {
-        printf("usage : sudo %s <host>\n", argv[0]);
-        return 0;
+        usage(argv[0]);
+        return 1;
     }
 
-    struct hostent host_entity;
-    struct in_addr **ip_list = dns_lookup(argv[1], &host_entity);
-    if (ip_list == NULL)
-    {
-        printf("Resolving failed.\n");
-        return 0;
-    }
-
-    printf("All addresses: \n");
-    int i;
-    for (i = 0; ip_list[i] != NULL; i++)
-    {
-        printf("%s ", inet_ntoa(*ip_list[i]));
-        printf("\n");
-    }
-    int num_thread = i;
-
+    int i, j, index = 0;
+    int num_thread = needed_thread_NO(optind, argc, argv);
     pthread_t *pthreadArray = malloc(sizeof(pthread_t) * num_thread);
-    for (i = 0; i < num_thread; i++)
-    {
-        struct sockaddr_in server_addr;
-        server_addr.sin_family = host_entity.h_addrtype;
-        // The ICMP packet does not have port numbers because
-        // it was designed to communicate network-layer information
-        // not between application layer processes
-        server_addr.sin_addr.s_addr = *(long *)ip_list[i];
 
-        int sockfd = socket_creation();
-        if (sockfd < 0)
+    for (j = optind; j < argc; j++)
+    {
+        printf("non-option arg: %s\n", argv[j]);
+        struct hostent host_entity;
+        struct in_addr **ip_list = dns_lookup(argv[j], &host_entity);
+        if (ip_list == NULL)
         {
-            printf("Socket() failed.\n");
-            free(pthreadArray);
+            printf("Resolving failed.\n");
             exit(EXIT_FAILURE);
         }
 
-        ip_addr = (char *)malloc(NI_MAXHOST * sizeof(char));
-        //filling up address structure
-        strcpy(ip_addr, inet_ntoa(*(struct in_addr *)ip_list[i]));
+        for (i = 0; ip_list[i] != NULL; i++)
+        {
+        }
+        int counter = i;
 
-        struct thread_args *args_p = malloc(sizeof(struct thread_args));
-        args_p->ping_sockfd = sockfd;
-        args_p->ping_addr = &server_addr;
-        args_p->ping_ip = ip_addr;
+        for (i = 0; i < counter; i++)
+        {
+            struct sockaddr_in server_addr;
+            server_addr.sin_family = host_entity.h_addrtype;
+            // The ICMP packet does not have port numbers because
+            // it was designed to communicate network-layer information
+            // not between application layer processes
+            server_addr.sin_addr.s_addr = *(long *)ip_list[i];
 
-        printf("Host<%s> added for being pinged...\n", ip_addr);
-        pthread_create(&pthreadArray[i], NULL, send_ping, args_p);
+            int sockfd = socket_creation();
+            if (sockfd < 0)
+            {
+                printf("Socket() failed.\n");
+                free(pthreadArray);
+                exit(EXIT_FAILURE);
+            }
+
+            ip_addr = (char *)malloc(NI_MAXHOST * sizeof(char));
+            //filling up address structure
+            strcpy(ip_addr, inet_ntoa(*(struct in_addr *)ip_list[i]));
+
+            struct thread_args *args_p = malloc(sizeof(struct thread_args));
+            args_p->ping_sockfd = sockfd;
+            args_p->ping_addr = &server_addr;
+            args_p->ping_ip = ip_addr;
+
+            printf("Host<%s> added for being pinged...\n", ip_addr);
+            pthread_create(&pthreadArray[index++], NULL, send_ping, args_p);
+        }
     }
     for (i = 0; i < num_thread; i++)
     {
@@ -114,6 +129,27 @@ int main(int argc, char *argv[])
         assert(!result_code);
     }
     return 0;
+}
+
+int needed_thread_NO(int optind, int argc, char *argv[])
+{
+    int no = 0;
+    for (int i = optind; i < argc; ++i)
+    {
+        struct hostent host_entity;
+        struct in_addr **ip_list = dns_lookup(argv[i], &host_entity);
+        if (ip_list == NULL)
+        {
+            printf("Resolving failed.\n");
+            exit(EXIT_FAILURE);
+        }
+        int j;
+        for (j = 0; ip_list[j] != NULL; j++)
+        {
+        }
+        no += j;
+    }
+    return no;
 }
 
 // get all Resolutions - DNS lookup
@@ -147,7 +183,7 @@ int socket_creation()
     }
 
     struct timeval tv_out;
-    tv_out.tv_sec = RECV_TIMEOUT;
+    tv_out.tv_sec = timeout;
     tv_out.tv_usec = 0;
 
     // set socket options at ip to TTL
@@ -291,4 +327,55 @@ void intHandler(int dummy)
     continue_pinging = false;
     printf("\n------------statistics------------\n");
     printf("MINIMUM RTT=<%Lf>ms MAXIMUM RTT=<%Lf>ms.\n", min_rtt, max_rtt);
+}
+
+bool parse_argv(int argc, char *argv[])
+{
+    if (argc == 1)
+        return 0;
+
+    int c;
+    int opt_index = 0;
+
+    while (c != -1)
+    {
+        c = getopt_long(argc, argv, "s:t:", long_options, &opt_index);
+
+        if (c == -1)
+            break;
+
+        switch (c)
+        {
+        case 0x1:
+            return false;
+            break;
+
+        // size of packet
+        case 's':
+            packet_size = atoi(optarg);
+            printf("size : %d\n", packet_size);
+            break;
+
+        // timeout
+        case 't':
+            timeout = atoi(optarg);
+            printf("timeout : %d\n", timeout);
+            break;
+
+        default:
+            printf("\n");
+            return false;
+            break;
+        }
+    }
+
+    return (argc - optind > 0);
+}
+
+void usage(char *app)
+{
+    printf("Usage: sudo %s [options] <host(s)>\n", app);
+    printf("  Options:\n");
+    printf("    -s|--size <num>|Size of packet (default: %d))\n", DEFAULT_PACKET_SIZE);
+    printf("    -t|--timeout <num>|Timeout is sec (default: %d)\n", DEFAULT_RECV_TIMEOUT);
 }
