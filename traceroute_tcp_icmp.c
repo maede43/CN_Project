@@ -13,6 +13,7 @@
 #include <netinet/ip_icmp.h>
 
 #define PORT_NUMBER 12500
+#define TIMEOUT 10 // seconds
 
 int main(int argc, char *argv[])
 {
@@ -72,6 +73,24 @@ int main(int argc, char *argv[])
     if (recvSocket < 0)
     {
         perror("failed to create icmp socket");
+        exit(-1);
+    }
+
+    // timeout
+    struct timeval timeout;
+    timeout.tv_sec = TIMEOUT;
+
+    int setTimeoutOptTcp = setsockopt(sendSocket, SOL_SOCKET, SO_SNDTIMEO, (struct timeval *)&timeout, sizeof(struct timeval));
+    if (setTimeoutOptTcp < 0)
+    {
+        perror("failed to set socket timeout (tcp)");
+        exit(-1);
+    }
+
+    int setTimeoutOptIcmp = setsockopt(recvSocket, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&timeout, sizeof(struct timeval));
+    if (setTimeoutOptIcmp < 0)
+    {
+        perror("failed to set socket timeout (icmp)");
         exit(-1);
     }
 
