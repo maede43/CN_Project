@@ -14,6 +14,8 @@
 
 #define PORT_NUMBER 12500
 #define TIMEOUT 10 // seconds
+#define MAX_TTL 30
+#define RECV_BUF_LEN 10000
 
 int main(int argc, char *argv[])
 {
@@ -94,5 +96,91 @@ int main(int argc, char *argv[])
         exit(-1);
     }
 
-    return 0;
+    // receive buffer
+    char recvBuffer[RECV_BUF_LEN];
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof(struct sockaddr_in);
+    long numBytesReceived;
+
+    printf("******************************************************\n");
+    printf("0: %s <gateway>\n", inet_ntoa(src_addr->sin_addr));
+    int i = 1;
+    while (i < MAX_TTL)
+    {
+        int icmpErrorReceived = 0;
+
+        // set TTL in IP header
+        setsockopt(sendSocket, IPPROTO_IP, IP_TTL, &i, sizeof(i));
+
+        // send SYN packet (start 3-way handshake)
+        errno = 0;
+        connect(sendSocket, (struct sockaddr *)&dest_addr, sizeof(struct sockaddr));
+
+        // TTL expired
+        if (errno == EHOSTUNREACH)
+        {
+            while (!icmpErrorReceived)
+            {
+                numBytesReceived = recvfrom(recvSocket, recvBuffer, RECV_BUF_LEN, 0, (struct sockaddr *)&cli_addr, &cli_len);
+
+                // extract IP header
+                struct ip *ip_hdr = (struct ip *)recvBuffer;
+
+                // extract ICMP header
+                int ipHeaderLength = 4 * ip_hdr->ip_hl;
+                struct icmp *icmp_hdr = (struct icmp *)((char *)ip_hdr + ipHeaderLength);
+
+                int icmpMessageType = icmp_hdr->icmp_type;
+                int icmpMessageCode = icmp_hdr->icmp_code;
+
+                // TTL exceeded
+                if (icmpMessageType == ICMP_TIME_EXCEEDED && icmpMessageCode == ICMP_NET_UNREACH)
+                {
+                    // check if ICMP messages are related to TCP SYN packets
+                    struct ip *inner_ip_hdr = (struct ip *)((char *)icmp_hdr + ICMP_MINLEN);
+                    if (inner_ip_hdr->ip_p == IPPROTO_TCP)
+                    {
+                        icmpErrorReceived = 1;
+                    }
+                }
+
+                // port unreachable
+                else if (icmpMessageType == ICMP_DEST_UNREACH && icmpMessageCode == ICMP_PORT_UNREACH)
+                {
+                    printf("%d: %s [complete]\n", i, inet_ntoa(dest_addr.sin_addr));
+                    printf("******************************************************\n");
+                    exit(0);
+                }
+            }
+            printf("%d: %s\n", i, inet_ntoa(cli_addr.sin_addr));
+
+            // timeout
+        }
+        else if (
+            errno == ETIMEDOUT      // socket timeout
+            || errno == EINPROGRESS // operation in progress
+            || errno == EALREADY    // consecutive timeouts
+        )
+        {
+            printf("%d: * * * * * [timeout]\n", i);
+        }
+
+        // destination reached
+        else if (errno == ECONNRESET || errno == ECONNREFUSED)
+        {
+            printf("%d: %s [complete]\n", i, inet_ntoa(dest_addr.sin_addr));
+            printf("******************************************************\n");
+            exit(0);
+        }
+        else
+        {
+            printf("Unknown error: %d sending SYN packet\n", errno);
+            exit(-1);
+        }
+
+        i++;
+    }
+    printf("Unable to reach host within TTL of %d\n", MAX_TTL);
+    printf("******************************************************\n");
+    return -1;
 }
