@@ -11,15 +11,40 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/ip_icmp.h>
+#include <stdbool.h>
+#include <getopt.h>
 
-#define PORT_NUMBER 12500
+#define PORT_NUMBER 12564
 #define TIMEOUT 10 // seconds
 #define MAX_TTL 30
 #define RECV_BUF_LEN 10000
 
+char *dest;
+bool check_dst = false;
+int timeout_ = TIMEOUT;
+int max_ttl = MAX_TTL;
+int start_ttl = 1;
+// int packet_size 
+int port = PORT_NUMBER;
+
+void usage(char *app);
+bool parse_argv(int argc, char *argv[]);
+const static struct option long_options[] = {
+	{"help", no_argument, 0, 0x1},
+    {"destination-host", required_argument, 0, 'd'},
+    {"timeout", required_argument, 0, 't'},
+	{"max-ttl", required_argument, 0, 'm'},
+    {"start-ttl", required_argument, 0, 's'},
+    {"port-number", required_argument, 0, 'p'},
+	{0, 0, 0, 0}};
+
 int main(int argc, char *argv[])
 {
-    char *dest = argv[1];
+	if (!parse_argv(argc, argv))
+	{
+		usage(argv[0]);
+		return 1;
+	}
 
     // Get current IP
     struct sockaddr_in *src_addr;
@@ -45,7 +70,7 @@ int main(int argc, char *argv[])
     // Resolve destination IP
     struct sockaddr_in dest_addr;
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(PORT_NUMBER);
+    dest_addr.sin_port = htons(port);
 
     int is_ip_addr = inet_pton(AF_INET, dest, &(dest_addr.sin_addr));
     if (!is_ip_addr)
@@ -80,7 +105,7 @@ int main(int argc, char *argv[])
 
     // timeout
     struct timeval timeout;
-    timeout.tv_sec = TIMEOUT;
+    timeout.tv_sec = timeout_;
 
     int setTimeoutOptTcp = setsockopt(sendSocket, SOL_SOCKET, SO_SNDTIMEO, (struct timeval *)&timeout, sizeof(struct timeval));
     if (setTimeoutOptTcp < 0)
@@ -103,9 +128,9 @@ int main(int argc, char *argv[])
     long numBytesReceived;
 
     printf("******************************************************\n");
-    printf("0: %s <gateway>\n", inet_ntoa(src_addr->sin_addr));
+    // printf("0: %s <gateway>\n", inet_ntoa(src_addr->sin_addr));
     int i = 1;
-    while (i < MAX_TTL)
+    while (i < max_ttl)
     {
         int icmpErrorReceived = 0;
 
@@ -152,7 +177,8 @@ int main(int argc, char *argv[])
                     exit(0);
                 }
             }
-            printf("%d: %s\n", i, inet_ntoa(cli_addr.sin_addr));
+            if (i >= start_ttl)
+                printf("%d: %s\n", i, inet_ntoa(cli_addr.sin_addr));
 
             // timeout
         }
@@ -180,7 +206,78 @@ int main(int argc, char *argv[])
 
         i++;
     }
-    printf("Unable to reach host within TTL of %d\n", MAX_TTL);
+    printf("Unable to reach host within TTL of %d\n", max_ttl);
     printf("******************************************************\n");
     return -1;
+}
+
+bool parse_argv(int argc, char *argv[])
+{
+	if (argc == 1)
+		return 0;
+
+	int c;
+	int opt_index = 0;
+
+	while (c != -1)
+	{
+		c = getopt_long(argc, argv, "s:t:m:p:d:", long_options, &opt_index);
+
+		if (c == -1)
+			break;
+
+		switch (c)
+		{
+            case 0x1:
+                return false;
+                break;
+
+            // destination host
+            case 'd':
+                dest = optarg;
+                printf("destination : %s\n", dest);
+                check_dst = true;
+                break;
+
+            // max ttl
+            case 'm':
+                max_ttl = atoi(optarg);
+                printf("max ttl : %d\n", max_ttl);
+                break;
+
+            // timeout
+            case 't':
+                timeout_ = atoi(optarg);
+                printf("timeout : %d\n", timeout_);
+                break;
+
+            // start ttl
+            case 's' :
+                start_ttl = atoi(optarg);
+                printf("start ttl : %d\n", start_ttl);
+                break;
+
+            // port number
+            case 'p' :
+                port = atoi(optarg);
+                printf("port: %d\n", port);
+                break;    
+
+            default:
+                printf("\n");
+                return false;
+                break;
+		}
+	}
+	return check_dst;
+}
+
+void usage(char *app)
+{
+	printf("Usage: sudo %s -d <host> [options]\n", app);
+    printf("  Options:\n");
+	printf("    -m|--max-ttl <num>|Max ttl (default: %d))\n", MAX_TTL);
+	printf("    -t|--timeout <num>|Timeout is sec (default: %d)\n", TIMEOUT);
+    printf("    -s|--start-ttl <num>|Start ttl (default: 1)\n");
+    printf("    -p|--port-number <num>|Port number (default: %d)\n", PORT_NUMBER);
 }
