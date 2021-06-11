@@ -11,22 +11,44 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/ip_icmp.h>
+#include <stdbool.h>
+#include <getopt.h>
+#include <time.h>
 
-#define UNUSED_PORT 12564
-#define MAX_TTL 30         // sanity
-#define SOCKET_TIMEOUT 10  // in seconds
-
+#define PORT_NUMBER 12564
+#define TIMEOUT 10 // seconds
+#define MAX_TTL 30
 #define RECV_BUF_LEN 10000
+#define DEF_TRIES 1
 
-int main (int argc, char *argv[])
+char *dest;
+bool check_dst = false;
+int timeout_ = TIMEOUT;
+int max_ttl = MAX_TTL;
+int start_ttl = 1;
+// int packet_size 
+int port = PORT_NUMBER;
+int tries = DEF_TRIES;
+
+void usage(char *app);
+bool parse_argv(int argc, char *argv[]);
+const static struct option long_options[] = {
+	{"help", no_argument, 0, 0x1},
+    {"destination-host", required_argument, 0, 'd'},
+    {"timeout", required_argument, 0, 't'},
+	{"max-ttl", required_argument, 0, 'm'},
+    {"start-ttl", required_argument, 0, 's'},
+    {"port-number", required_argument, 0, 'p'},
+    {"tries-number", required_argument, 0, 'a'},
+	{0, 0, 0, 0}};
+
+int main(int argc, char *argv[])
 {
-    if (argc != 2)
-    {
-        printf("Usage: %s <IP address> or <URL>\n ", argv[0]);
-        exit(-1);
-    }
-
-    char *trace_dest = argv[1];
+	if (!parse_argv(argc, argv))
+	{
+		usage(argv[0]);
+		return 1;
+	}
 
     // Get current IP
     struct sockaddr_in *src_addr;
@@ -39,44 +61,41 @@ int main (int argc, char *argv[])
     }
 
     id_tmp = id;
-    while (id_tmp) 
+    while (id_tmp)
     {
         if ((id_tmp->ifa_addr) && (id_tmp->ifa_addr->sa_family == AF_INET))
         {
-            src_addr = (struct sockaddr_in *) id_tmp->ifa_addr;
+            src_addr = (struct sockaddr_in *)id_tmp->ifa_addr;
         }
         id_tmp = id_tmp->ifa_next;
     }
-    printf("Traceroute from host: %s\n", inet_ntoa(src_addr->sin_addr));
+    printf("GATEWAY<%s>\n", inet_ntoa(src_addr->sin_addr));
 
     // Resolve destination IP
-    struct sockaddr_in dest_addr; 
+    struct sockaddr_in dest_addr;
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(UNUSED_PORT);
+    dest_addr.sin_port = htons(port);
 
-    int is_ip_addr = inet_pton(AF_INET, trace_dest, &(dest_addr.sin_addr));
+    int is_ip_addr = inet_pton(AF_INET, dest, &(dest_addr.sin_addr));
     if (!is_ip_addr)
     {
         struct hostent *host;
-        host = gethostbyname(trace_dest);
+        host = gethostbyname(dest);
         if (host == NULL)
         {
-            perror("Invalid host or failed DNS resolution");
+            perror("failed DNS resolution!");
             exit(-1);
         }
 
         dest_addr.sin_addr = *((struct in_addr *)host->h_addr);
-        printf("[DNS resolution] %s resolved to %s\n",
-                trace_dest,
-                inet_ntoa(dest_addr.sin_addr));
-
+        // printf("DESTINATION<%s> : ip<%s>\n", trace_dest, inet_ntoa(dest_addr.sin_addr));
     }
 
     // create socket to send tcp messages
     int sendSocket = socket(PF_INET, SOCK_STREAM, 0);
     if (sendSocket < 0)
     {
-        perror("Error creating tcp socket");
+        perror("failed to create tcp socket");
         exit(-1);
     }
 
@@ -84,27 +103,25 @@ int main (int argc, char *argv[])
     int recvSocket = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (recvSocket < 0)
     {
-        perror("Error creating icmp socket");
+        perror("failed to create icmp socket");
         exit(-1);
     }
 
-    // set timeout 
+    // timeout
     struct timeval timeout;
-    timeout.tv_sec = SOCKET_TIMEOUT;
+    timeout.tv_sec = timeout_;
 
-    int setTimeoutOptTcp = setsockopt(sendSocket, SOL_SOCKET, SO_SNDTIMEO,
-            (struct timeval *)&timeout, sizeof(struct timeval));
+    int setTimeoutOptTcp = setsockopt(sendSocket, SOL_SOCKET, SO_SNDTIMEO, (struct timeval *)&timeout, sizeof(struct timeval));
     if (setTimeoutOptTcp < 0)
     {
-        perror("Error setting socket timeout (tcp)");
+        perror("failed to set socket timeout (tcp)");
         exit(-1);
     }
 
-    int setTimeoutOptIcmp = setsockopt(recvSocket, SOL_SOCKET, SO_RCVTIMEO,
-            (struct timeval *)&timeout, sizeof(struct timeval));
+    int setTimeoutOptIcmp = setsockopt(recvSocket, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&timeout, sizeof(struct timeval));
     if (setTimeoutOptIcmp < 0)
     {
-        perror("Error setting socket timeout (icmp)");
+        perror("failed to set socket timeout (icmp)");
         exit(-1);
     }
 
@@ -114,102 +131,176 @@ int main (int argc, char *argv[])
     socklen_t cli_len = sizeof(struct sockaddr_in);
     long numBytesReceived;
 
-    printf("--------------- traceroute results ---------------\n");
-    printf("0: %s [start]\n", inet_ntoa(src_addr->sin_addr));
-    int i = 0;
-    while (i < MAX_TTL)
+    printf("******************************************************\n");
+    // printf("0: %s <gateway>\n", inet_ntoa(src_addr->sin_addr));
+
+    struct timespec time_start, time_end;
+    long double rtt = 0;
+    int i = 1;
+    while (i < max_ttl)
     {
-        i++;
+        for (int k = 0; k < tries; k++) {
+            int icmpErrorReceived = 0;
 
-        // set TTL in IP header
-        setsockopt(sendSocket, IPPROTO_IP, IP_TTL, &i, sizeof(i));
+            // set TTL in IP header
+            setsockopt(sendSocket, IPPROTO_IP, IP_TTL, &i, sizeof(i));
 
-        // send SYN packet (start 3-way handshake)
-        errno = 0;
-        connect(
-                sendSocket,
-                (struct sockaddr *)&dest_addr,
-                sizeof(struct sockaddr));
+            clock_gettime(CLOCK_MONOTONIC, &time_start);
 
-        int icmpErrorReceived = 0;
+            // send SYN packet (start 3-way handshake)
+            errno = 0;
+            connect(sendSocket, (struct sockaddr *)&dest_addr, sizeof(struct sockaddr));
 
-        // TTL expired
-        if (errno == EHOSTUNREACH)
-        {
-            while (!icmpErrorReceived)
+            // calculate RTT
+            clock_gettime(CLOCK_MONOTONIC, &time_end);
+            double timeElapsed = ((double)(time_end.tv_nsec - time_start.tv_nsec)) / 1000000.0;
+            rtt = (time_end.tv_sec - time_start.tv_sec) * 1000.0 + timeElapsed;
+
+            // TTL expired
+            if (errno == EHOSTUNREACH)
             {
-                numBytesReceived = recvfrom(
-                        recvSocket,
-                        recvBuffer,
-                        RECV_BUF_LEN,
-                        0,
-                        (struct sockaddr *)&cli_addr,
-                        &cli_len);
-
-                // extract IP header
-                struct ip *ip_hdr = (struct ip *)recvBuffer;
-
-                // extract ICMP header
-                int ipHeaderLength = 4 * ip_hdr->ip_hl;
-                struct icmp *icmp_hdr =
-                    (struct icmp *)( (char*) ip_hdr + ipHeaderLength );
-
-                int icmpMessageType = icmp_hdr->icmp_type;
-                int icmpMessageCode = icmp_hdr->icmp_code;
-
-                //printf("ICMP type: %d code: %d\n",
-                //   icmpMessageType, icmpMessageCode);
-
-                // TTL exceeded
-                if (icmpMessageType == ICMP_TIME_EXCEEDED
-                        && icmpMessageCode == ICMP_NET_UNREACH)
+                while (!icmpErrorReceived)
                 {
-                    // check if ICMP messages are related to TCP SYN packets
-                    struct ip *inner_ip_hdr = 
-                        (struct ip *)( (char*) icmp_hdr + ICMP_MINLEN);
-                    if (inner_ip_hdr->ip_p == IPPROTO_TCP)
+                    numBytesReceived = recvfrom(recvSocket, recvBuffer, RECV_BUF_LEN, 0, (struct sockaddr *)&cli_addr, &cli_len);
+
+                    // extract IP header
+                    struct ip *ip_hdr = (struct ip *)recvBuffer;
+
+                    // extract ICMP header
+                    int ipHeaderLength = 4 * ip_hdr->ip_hl;
+                    struct icmp *icmp_hdr = (struct icmp *)((char *)ip_hdr + ipHeaderLength);
+
+                    int icmpMessageType = icmp_hdr->icmp_type;
+                    int icmpMessageCode = icmp_hdr->icmp_code;
+
+                    // TTL exceeded
+                    if (icmpMessageType == ICMP_TIME_EXCEEDED && icmpMessageCode == ICMP_NET_UNREACH)
                     {
-                        icmpErrorReceived = 1;
+                        // check if ICMP messages are related to TCP SYN packets
+                        struct ip *inner_ip_hdr = (struct ip *)((char *)icmp_hdr + ICMP_MINLEN);
+                        if (inner_ip_hdr->ip_p == IPPROTO_TCP)
+                        {
+                            icmpErrorReceived = 1;
+                        }
+                    }
+                    // port unreachable
+                    else if (icmpMessageType == ICMP_DEST_UNREACH && icmpMessageCode == ICMP_PORT_UNREACH)
+                    {
+                        printf("%d: %s in %Lfms after %d tries [complete]\n", i, inet_ntoa(dest_addr.sin_addr), rtt, k + 1);
+                        printf("******************************************************\n");
+                        exit(0);
                     }
                 }
-
-                // port unreachable
-                else if (icmpMessageType == ICMP_DEST_UNREACH
-                        && icmpMessageCode == ICMP_PORT_UNREACH)
-                {
-                    printf("%d: %s [complete]\n", 
-                            i, inet_ntoa(dest_addr.sin_addr));
-                    printf("--------------- traceroute terminated ---------------\n");
-                    exit(0);
+                if (i >= start_ttl){
+                    printf("%d: %s in %Lfms after %d tries \n", i, inet_ntoa(cli_addr.sin_addr), rtt, k + 1);
+                    break;
                 }
-            }
-            printf("%d: %s\n", i, inet_ntoa(cli_addr.sin_addr));
 
-            // case: timeout
-        } else if (
+                // timeout
+            }
+            else if (
                 errno == ETIMEDOUT      // socket timeout
                 || errno == EINPROGRESS // operation in progress
                 || errno == EALREADY    // consecutive timeouts
-                )
-        {
-            printf("%d: * * * * * [timeout]\n", i);
+            )
+            {
+                if (i >= start_ttl && k == tries - 1)
+                    printf("%d: * * * * * [timeout]\n", i);
+            }
+            // destination reached
+            else if (errno == ECONNRESET || errno == ECONNREFUSED)
+            {
+                printf("%d: %s in %Lfms after %d tries [complete]\n", i, inet_ntoa(dest_addr.sin_addr), rtt, k + 1);
+                printf("******************************************************\n");
+                exit(0);
+            }
+            else
+            {
+                printf("Unknown error: %d sending SYN packet\n", errno);
+                exit(-1);
+            }
         }
-
-        // case: destination reached
-        else if (errno == ECONNRESET || errno == ECONNREFUSED)
-        {
-            printf("%d: %s [complete]\n", 
-                    i, inet_ntoa(dest_addr.sin_addr));
-            printf("--------------- traceroute terminated ---------------\n");
-            exit(0);
-        }
-        else
-        {
-            printf("Unknown error: %d sending SYN packet\n", errno);
-            exit(-1);
-        }
+        i++;
     }
-    printf("Unable to reach host within TTL of %d\n", MAX_TTL); 
-    printf("--------------- traceroute terminated ---------------\n");
+    printf("Unable to reach host within TTL of %d\n", max_ttl);
+    printf("******************************************************\n");
     return -1;
+}
+
+bool parse_argv(int argc, char *argv[])
+{
+	if (argc == 1)
+		return 0;
+
+	int c;
+	int opt_index = 0;
+
+	while (c != -1)
+	{
+		c = getopt_long(argc, argv, "s:t:m:p:d:a:", long_options, &opt_index);
+
+		if (c == -1)
+			break;
+
+		switch (c)
+		{
+            case 0x1:
+                return false;
+                break;
+
+            // destination host
+            case 'd':
+                dest = optarg;
+                printf("destination : %s\n", dest);
+                check_dst = true;
+                break;
+
+            // max ttl
+            case 'm':
+                max_ttl = atoi(optarg);
+                printf("max ttl : %d\n", max_ttl);
+                break;
+
+            // timeout
+            case 't':
+                timeout_ = atoi(optarg);
+                printf("timeout : %d\n", timeout_);
+                break;
+
+            // start ttl
+            case 's' :
+                start_ttl = atoi(optarg);
+                printf("start ttl : %d\n", start_ttl);
+                break;
+
+            // port number
+            case 'p' :
+                port = atoi(optarg);
+                printf("port: %d\n", port);
+                break;    
+
+            // tries number
+            case 'a' :
+                tries = atoi(optarg);
+                printf("tries number : %d\n", tries);
+                break;  
+
+            default:
+                printf("\n");
+                return false;
+                break;
+		}
+	}
+	return check_dst;
+}
+
+void usage(char *app)
+{
+	printf("Usage: sudo %s -d <host> [options]\n", app);
+    printf("  Options:\n");
+	printf("    -m|--max-ttl <num>|Max ttl (default: %d))\n", MAX_TTL);
+	printf("    -t|--timeout <num>|Timeout is sec (default: %d)\n", TIMEOUT);
+    printf("    -s|--start-ttl <num>|Start ttl (default: 1)\n");
+    printf("    -p|--port-number <num>|Port number (default: %d)\n", PORT_NUMBER);
+    printf("    -a|--tries-number <num>|Tries number (default: %d)\n", DEF_TRIES);
 }
